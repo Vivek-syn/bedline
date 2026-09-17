@@ -1,30 +1,72 @@
-// This file creates ONE connection "pool" to PostgreSQL that the
-// whole app shares. A pool keeps several open connections ready to
-// go, instead of opening/closing a new connection for every query
-// (which would be slow).
+// One shared connection pool for the whole process.
 
 const { Pool } = require('pg');
-require('dotenv').config();
+const config = require('./env');
 
 const pool = new Pool({
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  host: process.env.DB_HOST,
-  port: process.env.DB_PORT,
-  database: process.env.DB_NAME,
+  user: config.db.user,
+  password: config.db.password,
+  host: config.db.host,
+  port: config.db.port,
+  database: config.db.database,
+  max: config.db.max,
+  ssl: config.db.ssl,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 5_000,
 });
 
-// Quick sanity check when the server boots.
-pool.connect()
-  .then((client) => {
-    console.log('✅ Connected to PostgreSQL');
-    client.release(); // give the connection back to the pool
-  })
-  .catch((err) => {
-    console.error('❌ Failed to connect to PostgreSQL:', err.message);
-  });
+// An idle client erroring out (network blip, database restart)
+// emits on the pool. Without a listener Node treats it as an
+// unhandled 'error' event and kills the process.
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle database client:', err.message);
+});
 
-// Every other file in the app will do:
-//   const db = require('../config/db');
-//   db.query('SELECT * FROM users WHERE id = $1', [id]);
-module.exports = pool;
+/**
+ * Run a statement. Always pass values as the second argument so
+ * pg parameterises them — string-concatenating user input into
+ * SQL is how injection happens.
+ */
+function query(text, params) {
+  return pool.query(text, params);
+}
+
+/**
+ * Run several statements inside one transaction. The callback
+ * receives a dedicated client; returning normally commits,
+ * throwing rolls back, and the client is always released.
+ *
+ * Wrapping this in a helper rather than repeating BEGIN/COMMIT/
+ * ROLLBACK in every service removes the most common version of
+ * that bug: an early `return` between BEGIN and COMMIT that
+ * leaks the client and leaves the transaction open.
+ */
+async function transaction(callback) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackErr) {
+      console.error('Rollback failed:', rollbackErr.message);
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function verifyConnection() {
+  const client = await pool.connect();
+  try {
+    await client.query('SELECT 1');
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = { pool, query, transaction, verifyConnection };

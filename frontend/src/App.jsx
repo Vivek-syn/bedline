@@ -1,66 +1,91 @@
 // ============================================================
-// APP — the root component. Its job is purely to declare
-// ROUTES: which URL path renders which page component.
-// React Router reads the current browser URL and picks a match.
+// ROUTES
+//
+// One shell, one launcher, and one route per module — each
+// wrapped in the permission its backend manifest declares. The
+// route paths match the `route` field in those manifests.
+//
+// Note what is NOT here: there is no /admin, /doctor, /nurse
+// route. Everyone signs in and lands on /app. What differs is
+// which tiles and which sidebar entries the server says they can
+// reach.
 // ============================================================
 
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { useAuth } from './context/AuthContext';
+import { useAuth } from './auth/AuthContext';
+import RequirePermission from './auth/RequirePermission';
+import SignIn from './auth/SignIn';
+import Shell from './app/Shell';
+import Launcher from './app/Launcher';
 
-import Login from './pages/Login';
-import Register from './pages/Register';
-import AdminDashboard from './pages/AdminDashboard';
-import DoctorDashboard from './pages/DoctorDashboard';
-import NurseDashboard from './pages/NurseDashboard';
-import ReceptionistDashboard from './pages/ReceptionistDashboard';
-import PatientPortal from './pages/PatientPortal';
-import ProtectedRoute from './routes/ProtectedRoute';
+import Patients from './modules/Patients';
+import Beds from './modules/Beds';
+import Admissions from './modules/Admissions';
+import Wards from './modules/Wards';
+import Records from './modules/Records';
+import Billing from './modules/Billing';
+import MyStay from './modules/MyStay';
+import Roles from './modules/Roles';
+import Users from './modules/Users';
+import Activity from './modules/Activity';
+import Account from './modules/Account';
 
-// A tiny helper component: when someone lands on "/", send them
-// straight to their role's dashboard (or to /login if signed out).
-function HomeRedirect() {
-  const { user, loading } = useAuth();
+function RequireSession({ children }) {
+  const { session, loading } = useAuth();
+  if (loading) return <p className="loading">Loading…</p>;
+  if (!session) return <Navigate to="/sign-in" replace />;
+  return children;
+}
+
+function SignInGate() {
+  const { session, loading } = useAuth();
   if (loading) return null;
-  if (!user) return <Navigate to="/login" replace />;
-
-  const roleHome = {
-    admin: '/admin',
-    doctor: '/doctor',
-    nurse: '/nurse',
-    receptionist: '/reception',
-    patient: '/patient',
-  };
-  return <Navigate to={roleHome[user.role] || '/login'} replace />;
+  if (session) return <Navigate to="/app" replace />;
+  return <SignIn />;
 }
 
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<HomeRedirect />} />
-      <Route path="/login" element={<Login />} />
-      <Route path="/register" element={<Register />} />
+      <Route path="/sign-in" element={<SignInGate />} />
 
-      {/* Each dashboard is wrapped in ProtectedRoute with the ONE
-          role allowed to see it. Try logging in as a patient and
-          typing /admin in the address bar — you'll get bounced. */}
-      <Route path="/admin" element={
-        <ProtectedRoute allowedRoles={['admin']}><AdminDashboard /></ProtectedRoute>
-      } />
-      <Route path="/doctor" element={
-        <ProtectedRoute allowedRoles={['doctor']}><DoctorDashboard /></ProtectedRoute>
-      } />
-      <Route path="/nurse" element={
-        <ProtectedRoute allowedRoles={['nurse']}><NurseDashboard /></ProtectedRoute>
-      } />
-      <Route path="/reception" element={
-        <ProtectedRoute allowedRoles={['receptionist']}><ReceptionistDashboard /></ProtectedRoute>
-      } />
-      <Route path="/patient" element={
-        <ProtectedRoute allowedRoles={['patient']}><PatientPortal /></ProtectedRoute>
-      } />
+      <Route path="/app" element={<RequireSession><Shell /></RequireSession>}>
+        <Route index element={<Launcher />} />
+        <Route path="account" element={<Account />} />
 
-      {/* Catch-all for any unknown URL */}
-      <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="my-stay" element={
+          <RequirePermission permission="portal.view_own"><MyStay /></RequirePermission>
+        } />
+        <Route path="patients" element={
+          <RequirePermission permission="patient.view"><Patients /></RequirePermission>
+        } />
+        <Route path="beds" element={
+          <RequirePermission permission="bed.view"><Beds /></RequirePermission>
+        } />
+        <Route path="admissions" element={
+          <RequirePermission permission="admission.view"><Admissions /></RequirePermission>
+        } />
+        <Route path="wards" element={
+          <RequirePermission permission="ward.view"><Wards /></RequirePermission>
+        } />
+        <Route path="records" element={
+          <RequirePermission permission="record.view"><Records /></RequirePermission>
+        } />
+        <Route path="billing" element={
+          <RequirePermission permission="billing.view"><Billing /></RequirePermission>
+        } />
+        <Route path="roles" element={
+          <RequirePermission permission="role.view"><Roles /></RequirePermission>
+        } />
+        <Route path="users" element={
+          <RequirePermission permission="user.view"><Users /></RequirePermission>
+        } />
+        <Route path="activity" element={
+          <RequirePermission permission="audit.view"><Activity /></RequirePermission>
+        } />
+      </Route>
+
+      <Route path="*" element={<Navigate to="/app" replace />} />
     </Routes>
   );
 }

@@ -1,46 +1,85 @@
 // ============================================================
 // SERVER ENTRYPOINT
-// This is the file you run: `node server.js` (or `npm run dev`)
-// It wires everything together: middleware, routes, error handling.
+//
+//   npm run dev     development, with reload
+//   npm start       production
+//
+// Boot order matters here. The database must answer before the
+// registry sync can run, and the sync must finish before the
+// first request arrives — otherwise a route could guard a
+// permission that has no row yet and deny everybody.
 // ============================================================
 
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
+const http = require('http');
+const config = require('./src/config/env');
+const db = require('./src/config/db');
+const createApp = require('./src/app');
+const registry = require('./src/core/registry');
+const accessControlService = require('./src/modules/access-control/accessControl.service');
+const sockets = require('./src/sockets/socket');
 
-const authRoutes = require('./src/routes/authRoutes');
-const bedRoutes = require('./src/routes/bedRoutes');
-const admissionRoutes = require('./src/routes/admissionRoutes');
-const patientRoutes = require('./src/routes/patientRoutes');
-const wardRoutes = require('./src/routes/wardRoutes');
-const errorHandler = require('./src/middleware/errorHandler');
+async function start() {
+  console.log(`\nBedline API — ${config.nodeEnv}`);
 
-const app = express();
+  try {
+    await db.verifyConnection();
+    console.log('  database   connected');
+  } catch (err) {
+    console.error(`  database   FAILED: ${err.message}`);
+    console.error('\nCheck DB_HOST/DB_PORT/DB_NAME in backend/.env and that PostgreSQL is running.\n');
+    process.exit(1);
+  }
 
-// --- Global middleware (runs on EVERY request, in this order) ---
-app.use(helmet());               // sets safer HTTP headers
-app.use(cors());                 // allows the React app (different port) to call this API
-app.use(express.json());         // parses incoming JSON bodies into req.body
+  // Push the code-side module and permission definitions into the
+  // database. Idempotent, so it runs on every boot and a new
+  // module is live the moment the server restarts.
+  try {
+    const summary = await accessControlService.syncRegistry();
+    console.log(`  modules    ${summary.modules} registered, ${summary.permissions} permissions`);
+    if (summary.stale.length > 0) {
+      // Not deleted automatically: a permission vanishing from the
+      // code is more often a rename in progress than a deliberate
+      // removal, and dropping it would revoke access silently.
+      console.warn(`  warning    ${summary.stale.length} permission(s) in the database are no longer declared in code: ${summary.stale.join(', ')}`);
+    }
+  } catch (err) {
+    console.error(`  modules    FAILED: ${err.message}`);
+    console.error('\nHas the schema been created? Run:  npm run db:setup\n');
+    process.exit(1);
+  }
 
-// --- Health check (handy to confirm the server is alive) ---
-app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+  const app = createApp();
+  const server = http.createServer(app);
+  sockets.initialize(server);
 
-// --- Feature routes ---
-// Each of these is mounted at a "base path". So a route defined
-// as router.post('/login') inside authRoutes actually becomes
-// POST /api/auth/login once mounted here.
-app.use('/api/auth', authRoutes);
-app.use('/api/beds', bedRoutes);
-app.use('/api/admissions', admissionRoutes);
-app.use('/api/patients', patientRoutes);
-app.use('/api/wards', wardRoutes);
+  server.listen(config.port, () => {
+    console.log(`  listening  http://localhost:${config.port}`);
+    console.log(`  mounted    ${registry.modules.map((module) => `/api${module.basePath}`).join('  ')}\n`);
+  });
 
-// --- 404 handler for unmatched routes ---
-app.use((req, res) => res.status(404).json({ message: 'Route not found.' }));
+  // Finish in-flight requests before exiting, so a deploy does not
+  // cut a discharge off halfway through its transaction.
+  const shutdown = (signal) => {
+    console.log(`\n${signal} received, shutting down.`);
+    server.close(async () => {
+      await db.pool.end();
+      process.exit(0);
+    });
+    setTimeout(() => {
+      console.error('Shutdown timed out; forcing exit.');
+      process.exit(1);
+    }, 10_000).unref();
+  };
 
-// --- Central error handler (must be LAST) ---
-app.use(errorHandler);
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
+  // A rejected promise nobody caught has left the process in a
+  // state we cannot reason about. Log it loudly rather than
+  // letting Node continue in an unknown condition.
+  process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled promise rejection:', reason);
+  });
+}
+
+start();
